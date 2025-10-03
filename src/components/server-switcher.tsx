@@ -3,9 +3,10 @@ import { Check, ChevronsUpDown, GalleryVerticalEnd } from 'lucide-react';
 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
+import { Separator } from './ui/separator';
 
-export function VersionSwitcher({ versions, defaultVersion }: { versions: string[]; defaultVersion: string }) {
-    const [selectedVersion, setSelectedVersion] = React.useState(defaultVersion);
+export function ServerSwitcher({ servers, defaultServer }: { servers: string[]; defaultServer: string }) {
+    const [selectedServer, setSelectedServer] = React.useState(defaultServer);
 
     return (
         <SidebarMenu>
@@ -17,18 +18,22 @@ export function VersionSwitcher({ versions, defaultVersion }: { versions: string
                                 <GalleryVerticalEnd className="size-4" />
                             </div>
                             <div className="flex flex-col gap-0.5 leading-none">
-                                <span className="font-medium">Documentation</span>
-                                <span className="">v{selectedVersion}</span>
+                                <span className="font-medium">Servers</span>
+                                <span className="">{selectedServer}</span>
                             </div>
                             <ChevronsUpDown className="ml-auto" />
                         </SidebarMenuButton>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent className="w-(--radix-dropdown-menu-trigger-width)" align="start">
-                        {versions.map((version) => (
-                            <DropdownMenuItem key={version} onSelect={() => setSelectedVersion(version)}>
-                                v{version} {version === selectedVersion && <Check className="ml-auto" />}
+                        {servers.map((server) => (
+                            <DropdownMenuItem key={server} onSelect={() => setSelectedServer(server)}>
+                                {server} {server === selectedServer && <Check className="ml-auto" />}
                             </DropdownMenuItem>
                         ))}
+                        <Separator className="my-1" />
+                        <DropdownMenuItem key="add-new-server" onSelect={() => alert('Add new server')}>
+                            Add new server
+                        </DropdownMenuItem>
                     </DropdownMenuContent>
                 </DropdownMenu>
             </SidebarMenuItem>
