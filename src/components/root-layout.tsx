@@ -1,10 +1,10 @@
 import { Fragment, useMemo } from 'react';
 import { Link, Outlet, useLocation } from 'react-router';
-import { AppSidebar, sidebarData } from '@/components/app-sidebar';
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@/components/ui/breadcrumb';
-import { Separator } from '@/components/ui/separator';
-import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
-import { ThemeProvider } from '@/providers/theme';
+import { AppSidebar, sidebarData } from '@src/components/app-sidebar';
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@src/components/ui/breadcrumb';
+import { Separator } from '@src/components/ui/separator';
+import { SidebarInset, SidebarProvider, SidebarTrigger } from '@src/components/ui/sidebar';
+import { ThemeProvider } from '@src/providers/theme';
 import { ModeToggle } from './mode-toggle';
 
 type BreadcrumbEntry = {

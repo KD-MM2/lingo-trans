@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Textarea } from '@/components/ui/textarea';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@src/components/ui/alert-dialog';
+import { Alert, AlertDescription } from '@src/components/ui/alert';
+import { Badge } from '@src/components/ui/badge';
+import { Button } from '@src/components/ui/button';
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@src/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@src/components/ui/dialog';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@src/components/ui/dropdown-menu';
+import { Input } from '@src/components/ui/input';
+import { Label } from '@src/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@src/components/ui/select';
+import { Skeleton } from '@src/components/ui/skeleton';
+import { Textarea } from '@src/components/ui/textarea';
 import { AlertTriangleIcon, CheckIcon, CopyIcon, DownloadIcon, Edit3Icon, MoreVerticalIcon, PlusIcon, RefreshCcwIcon, SearchIcon, Trash2Icon, UploadIcon } from 'lucide-react';
 
-import { useTemplates } from '@/hooks/use-templates';
-import type { Template, TemplateCategory, TemplateDraft } from '@/types/template';
+import { useTemplates } from '@src/hooks/use-templates';
+import type { Template, TemplateCategory, TemplateDraft } from '@src/types/template';
 
 const categoryOptions: Array<{ label: string; value: TemplateCategory }> = [
     { label: 'Translation', value: 'translation' },

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import type { Template, TemplateCategory, TemplateDraft, TemplateUpdate } from '@/types/template';
+import type { Template, TemplateCategory, TemplateDraft, TemplateUpdate } from '@src/types/template';
 
 const STORAGE_KEY = 'lingo-trans:templates';
 

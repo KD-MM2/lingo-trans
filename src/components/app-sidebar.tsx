@@ -1,9 +1,10 @@
 import * as React from 'react';
 import { Link, useLocation } from 'react-router';
 
-// import { SearchForm } from '@/components/search-form';
-import { ServerSwitcher } from '@/components/server-switcher';
-import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@/components/ui/sidebar';
+// import { SearchForm } from '@src/components/search-form';
+import { ServerSwitcher, type ServerOption } from '@src/components/server-switcher';
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@src/components/ui/sidebar';
+import type { ModelProvider } from '@src/types/settings';
 
 // This is sample data.
 export type NavSection = {
@@ -15,8 +16,14 @@ export type NavSection = {
     }>;
 };
 
-export const sidebarData: { servers: string[]; navMain: NavSection[] } = {
-    servers: ['OpenAI', 'Claude', 'Self-hosted'],
+const serverOptions: Record<ModelProvider, ServerOption> = {
+    openai: { label: 'OpenAI', value: 'openai' },
+    claude: { label: 'Claude', value: 'claude' },
+    'self-hosted': { label: 'Self-hosted', value: 'self-hosted' }
+};
+
+export const sidebarData: { servers: ServerOption[]; navMain: NavSection[] } = {
+    servers: [serverOptions.openai, serverOptions.claude, serverOptions['self-hosted']],
     navMain: [
         {
             title: 'Tools',
@@ -68,7 +75,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     return (
         <Sidebar {...props}>
             <SidebarHeader>
-                <ServerSwitcher servers={sidebarData.servers} defaultServer={sidebarData.servers[0]} />
+                <ServerSwitcher servers={sidebarData.servers} defaultServer={serverOptions.openai.value} />
                 {/* <SearchForm /> */}
             </SidebarHeader>
             <SidebarContent>

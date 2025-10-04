@@ -4,11 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "wxt dev",
+    "build": "tsc -b && wxt build",
     "lint": "eslint .",
-    "preview": "vite preview",
-    "format": "prettier --write \"src/**/*.{js,ts,tsx,d.ts,html,css}\""
+    "preview": "wxt preview",
+    "zip": "wxt zip",
+    "format": "prettier --write \"{src,entrypoints}/**/*.{js,ts,tsx,d.ts,html,css}\""
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",
