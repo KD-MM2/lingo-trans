@@ -11,7 +11,10 @@ export default defineConfig({
         name: 'LingoTrans',
         version: '0.1.0',
         description: 'Translate, rewrite, and manage templates directly from a side panel.',
-        permissions: ['storage', 'activeTab', 'scripting', 'contextMenus', 'clipboardWrite'],
+        action: {
+            default_title: 'Open LingoTrans'
+        },
+        permissions: ['storage', 'activeTab', 'scripting', 'contextMenus', 'clipboardWrite', 'windows'],
         host_permissions: ['<all_urls>'],
         side_panel: {
             default_path: 'sidepanel.html'
