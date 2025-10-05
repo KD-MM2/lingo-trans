@@ -12,6 +12,8 @@ import {
     SELECTION_TRANSLATION_ERROR,
     SELECTION_TRANSLATION_PORT,
     START_SELECTION_TRANSLATION,
+    isContextTranslateSelectionMessage,
+    isContextTranslatePageMessage,
     type SelectionTranslationPortResponse
 } from '@src/lib/extension-messages';
 import { resolveLanguageLabel } from '@src/lib/languages';
@@ -152,6 +154,12 @@ const createSelectionButton = ({ onTranslate }: SelectionButtonCallbacks) => {
 };
 
 const cloneRect = (rect: DOMRect): DOMRect => new DOMRect(rect.x, rect.y, rect.width, rect.height);
+
+const createViewportFallbackRect = (): DOMRect => {
+    const centerX = window.scrollX + window.innerWidth / 2;
+    const centerY = window.scrollY + window.innerHeight / 2;
+    return new DOMRect(centerX, centerY, 1, 1);
+};
 
 const openSidePanel = async () => {
     try {
@@ -487,6 +495,214 @@ export default defineContentScript({
             }
         }
 
+        const triggerContextSelectionTranslation = (explicitText?: string) => {
+            const popupInstance = ensurePopup();
+            const selection = window.getSelection();
+            const rawText = typeof explicitText === 'string' && explicitText.trim().length > 0 ? explicitText : (selection?.toString() ?? '');
+            const text = rawText.trim();
+
+            if (!text) {
+                popupInstance.setTitle('No text selected');
+                popupInstance.setStatus('error', 'Highlight text before translating via the context menu.');
+                popupInstance.setPosition({ rect: createViewportFallbackRect() });
+                popupInstance.show();
+                return;
+            }
+
+            let rect: DOMRect | null = null;
+
+            if (selection && selection.rangeCount > 0) {
+                try {
+                    const rangeRect = selection.getRangeAt(0).getBoundingClientRect();
+                    if (rangeRect.width > 0 || rangeRect.height > 0) {
+                        rect = cloneRect(rangeRect);
+                    }
+                } catch (error) {
+                    console.debug('[LingoTrans] Failed to derive selection rectangle from current selection', error);
+                }
+            }
+
+            if (!rect) {
+                rect = createViewportFallbackRect();
+            }
+
+            const candidate: SelectionState = {
+                text,
+                behavior: 'float-icon',
+                rect
+            };
+
+            startTranslation(candidate, 'manual');
+        };
+
+        const translatePageInline = (targetLanguageOverride?: string) => {
+            const body = document.body;
+            if (!body) {
+                return;
+            }
+
+            const sourceText = body.innerText ?? '';
+            if (!sourceText.trim()) {
+                console.debug('[LingoTrans] Page translation skipped: no readable text content.');
+                return;
+            }
+
+            const targetLanguage = targetLanguageOverride || settings.defaultTargetLanguage || DEFAULT_SETTINGS.defaultTargetLanguage;
+            const targetLabel = resolveLanguageLabel(targetLanguage) || targetLanguage;
+
+            const overlay = document.createElement('div');
+            overlay.style.position = 'fixed';
+            overlay.style.top = '16px';
+            overlay.style.right = '16px';
+            overlay.style.zIndex = '2147483646';
+            overlay.style.padding = '12px 18px';
+            overlay.style.borderRadius = '14px';
+            overlay.style.color = '#f8fafc';
+            overlay.style.fontFamily = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif";
+            overlay.style.fontSize = '14px';
+            overlay.style.fontWeight = '600';
+            overlay.style.letterSpacing = '0.01em';
+            overlay.style.boxShadow = '0 18px 36px rgba(15, 23, 42, 0.25)';
+            overlay.style.pointerEvents = 'none';
+            overlay.style.transition = 'opacity 240ms ease';
+            overlay.style.opacity = '0';
+
+            const applyOverlayStyle = (status: 'loading' | 'success' | 'error', message: string) => {
+                overlay.textContent = message;
+                if (status === 'loading') {
+                    overlay.style.background = 'rgba(15, 23, 42, 0.95)';
+                } else if (status === 'success') {
+                    overlay.style.background = 'rgba(16, 185, 129, 0.95)';
+                } else {
+                    overlay.style.background = 'rgba(220, 38, 38, 0.95)';
+                }
+                overlay.style.opacity = '1';
+            };
+
+            const teardownOverlay = (delayMs: number) => {
+                window.setTimeout(() => {
+                    overlay.style.opacity = '0';
+                    window.setTimeout(() => {
+                        overlay.remove();
+                    }, 240);
+                }, delayMs);
+            };
+
+            applyOverlayStyle('loading', `Translating page to ${targetLabel}…`);
+            body.appendChild(overlay);
+
+            let port: RuntimePort | null = null;
+            try {
+                port = browser.runtime.connect({ name: SELECTION_TRANSLATION_PORT });
+            } catch (error) {
+                console.debug('[LingoTrans] Failed to open translation port for full-page translation', error);
+                applyOverlayStyle('error', 'Unable to start page translation. Check your connection.');
+                teardownOverlay(3600);
+                return;
+            }
+
+            const requestId = `page-${Date.now()}-${translationSequence++}`;
+            let translated = '';
+            let settled = false;
+
+            const cleanupPort = () => {
+                if (!port) {
+                    return;
+                }
+
+                try {
+                    port.onMessage?.removeListener?.(handlePortMessage as (message: unknown) => void);
+                } catch (error) {
+                    console.debug('[LingoTrans] Failed to remove page translation port message listener', error);
+                }
+
+                try {
+                    port.onDisconnect?.removeListener?.(handlePortDisconnect);
+                } catch (error) {
+                    console.debug('[LingoTrans] Failed to remove page translation port disconnect listener', error);
+                }
+
+                try {
+                    port.disconnect?.();
+                } catch (error) {
+                    console.debug('[LingoTrans] Failed to disconnect page translation port', error);
+                }
+
+                port = null;
+            };
+
+            const finalizeSuccess = () => {
+                if (settled) return;
+                settled = true;
+                cleanupPort();
+                body.innerText = translated || sourceText;
+                applyOverlayStyle('success', `Page translated to ${targetLabel}.`);
+                teardownOverlay(2400);
+            };
+
+            const finalizeError = (message: string) => {
+                if (settled) return;
+                settled = true;
+                cleanupPort();
+                applyOverlayStyle('error', message || 'Page translation failed.');
+                teardownOverlay(3600);
+            };
+
+            const handlePortMessage = (message: SelectionTranslationPortResponse) => {
+                if (message.requestId !== requestId || settled) {
+                    return;
+                }
+
+                switch (message.type) {
+                    case SELECTION_TRANSLATION_CHUNK:
+                        if (message.error) {
+                            finalizeError(message.error);
+                            return;
+                        }
+                        if (message.content) {
+                            translated += message.content;
+                        }
+                        if (message.done) {
+                            finalizeSuccess();
+                        }
+                        break;
+                    case SELECTION_TRANSLATION_COMPLETE:
+                        if (message.content) {
+                            translated = message.content;
+                        }
+                        finalizeSuccess();
+                        break;
+                    case SELECTION_TRANSLATION_ERROR:
+                        finalizeError(message.message);
+                        break;
+                    default:
+                        break;
+                }
+            };
+
+            const handlePortDisconnect = () => {
+                if (settled) {
+                    return;
+                }
+                finalizeError('Translation interrupted. Try again.');
+            };
+
+            port.onMessage?.addListener?.(handlePortMessage as (message: unknown) => void);
+            port.onDisconnect?.addListener?.(handlePortDisconnect);
+
+            try {
+                port.postMessage({
+                    type: START_SELECTION_TRANSLATION,
+                    requestId,
+                    text: sourceText,
+                    targetLanguage
+                });
+            } catch (error) {
+                console.debug('[LingoTrans] Failed to dispatch page translation request', error);
+                finalizeError('Unable to start page translation.');
+            }
+        };
+
         const handleSettingsUpdate = (next: Settings) => {
             settings = next;
             if (settings.selectionBehavior === 'off') {
@@ -541,9 +757,40 @@ export default defineContentScript({
             button.show();
         });
 
+        const runtimeMessageHandler = (message: unknown) => {
+            if (isContextTranslateSelectionMessage(message)) {
+                if (message.mode === 'popup') {
+                    triggerContextSelectionTranslation(message.text);
+                } else if (message.mode === 'sidepanel') {
+                    void openSidePanel();
+                }
+                return;
+            }
+
+            if (isContextTranslatePageMessage(message)) {
+                if (message.mode === 'inline') {
+                    translatePageInline(message.targetLanguage);
+                } else if (message.mode === 'sidepanel') {
+                    void openSidePanel();
+                }
+            }
+        };
+
+        try {
+            browser.runtime.onMessage.addListener(runtimeMessageHandler);
+        } catch (error) {
+            console.debug('[LingoTrans] Failed to subscribe to runtime messages in selection script', error);
+        }
+
         detector.start();
 
         ctx.onInvalidated(() => {
+            try {
+                browser.runtime.onMessage.removeListener(runtimeMessageHandler);
+            } catch (error) {
+                console.debug('[LingoTrans] Failed to remove runtime message listener in selection script', error);
+            }
+
             unsubscribe();
             detector.dispose();
             hideButton();

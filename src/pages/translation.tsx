@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { browser } from 'wxt/browser';
 import { CopyIcon } from 'lucide-react';
 
 import { Button } from '@src/components/ui/button';
@@ -10,6 +11,7 @@ import { SUPPORTED_LANGUAGES, resolveLanguageLabel } from '@src/lib/languages';
 import { DEFAULT_SETTINGS } from '@src/lib/settings';
 import { useSettings } from '@src/hooks/use-settings';
 import { translate } from '@src/lib/api';
+import { SIDE_PANEL_TRANSLATE_STORAGE_KEY, isSidePanelTranslateRequest } from '@src/lib/extension-messages';
 import type { TranslationRequest } from '@src/lib/api/types';
 
 const MAX_CHARACTERS = 5000;
@@ -24,8 +26,61 @@ export default function Translation() {
     const [isTranslating, setIsTranslating] = useState(false);
     const [copied, setCopied] = useState(false);
     const copyResetRef = useRef<number | null>(null);
+    const abortControllerRef = useRef<AbortController | null>(null);
+    const lastSidePanelTimestampRef = useRef<number | null>(null);
 
     const languageOptions = useMemo(() => [...SUPPORTED_LANGUAGES].sort((a, b) => a.english.localeCompare(b.english)), []);
+
+    const runTranslation = useCallback(
+        async (text: string, language: string) => {
+            const normalized = text.trim();
+            if (!normalized || !language) {
+                return;
+            }
+
+            abortControllerRef.current?.abort();
+
+            const controller = new AbortController();
+            abortControllerRef.current = controller;
+
+            setInputText(text);
+            setTargetLanguage(language);
+            setIsTranslating(true);
+            setTranslatedText('');
+            setLastRequestedLanguage(language);
+
+            try {
+                const request: TranslationRequest = {
+                    text,
+                    targetLanguage: language,
+                    sourceLanguage: 'auto'
+                };
+
+                await translate(settings, request, {
+                    signal: controller.signal,
+                    onStream: (chunk) => {
+                        if (chunk.content) {
+                            setTranslatedText((prev) => prev + chunk.content);
+                        }
+                        if (chunk.error) {
+                            console.error('Translation error:', chunk.error);
+                        }
+                    }
+                });
+            } catch (error) {
+                if (!controller.signal.aborted) {
+                    console.error('Translation failed:', error);
+                    setTranslatedText(`Error: ${error instanceof Error ? error.message : 'Translation failed. Please check your settings and try again.'}`);
+                }
+            } finally {
+                if (abortControllerRef.current === controller) {
+                    abortControllerRef.current = null;
+                }
+                setIsTranslating(false);
+            }
+        },
+        [settings]
+    );
 
     useEffect(() => {
         if (!hydrated) return;
@@ -38,53 +93,109 @@ export default function Translation() {
         });
     }, [hydrated, settings.defaultTargetLanguage]);
 
+    useEffect(() => {
+        if (!hydrated) return;
+        if (!browser.storage?.local) return;
+
+        let cancelled = false;
+
+        const consumePendingPayload = async () => {
+            try {
+                const result = await browser.storage.local.get(SIDE_PANEL_TRANSLATE_STORAGE_KEY);
+                const raw = result?.[SIDE_PANEL_TRANSLATE_STORAGE_KEY] as { text?: string; targetLanguage?: string; timestamp?: number } | undefined;
+                if (cancelled || !raw) {
+                    return;
+                }
+
+                await browser.storage.local.remove(SIDE_PANEL_TRANSLATE_STORAGE_KEY);
+
+                const pendingText = typeof raw.text === 'string' ? raw.text : '';
+                const text = pendingText.trim();
+                if (!text) {
+                    return;
+                }
+
+                const timestamp = typeof raw.timestamp === 'number' ? raw.timestamp : null;
+                if (timestamp !== null && lastSidePanelTimestampRef.current === timestamp) {
+                    return;
+                }
+
+                lastSidePanelTimestampRef.current = timestamp;
+
+                const nextLanguage = raw.targetLanguage || settings.defaultTargetLanguage || DEFAULT_SETTINGS.defaultTargetLanguage;
+                void runTranslation(pendingText, nextLanguage);
+            } catch (error) {
+                console.debug('[Translation] Failed to consume pending side panel payload', error);
+            }
+        };
+
+        void consumePendingPayload();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [hydrated, runTranslation, settings.defaultTargetLanguage]);
+
+    useEffect(() => {
+        if (!hydrated) return;
+        if (!browser.runtime?.onMessage) {
+            return;
+        }
+
+        const handler = (message: unknown) => {
+            if (!isSidePanelTranslateRequest(message)) {
+                return;
+            }
+
+            const pendingText = typeof message.text === 'string' ? message.text : '';
+            const text = pendingText.trim();
+            if (!text) {
+                return;
+            }
+
+            const timestamp = typeof message.timestamp === 'number' ? message.timestamp : null;
+            if (timestamp !== null && lastSidePanelTimestampRef.current === timestamp) {
+                return;
+            }
+
+            lastSidePanelTimestampRef.current = timestamp;
+
+            const nextLanguage = message.targetLanguage || settings.defaultTargetLanguage || DEFAULT_SETTINGS.defaultTargetLanguage;
+            void runTranslation(pendingText, nextLanguage);
+        };
+
+        try {
+            browser.runtime.onMessage.addListener(handler);
+        } catch (error) {
+            console.debug('[Translation] Failed to subscribe to runtime translation messages', error);
+        }
+
+        return () => {
+            try {
+                browser.runtime.onMessage.removeListener(handler);
+            } catch (error) {
+                console.debug('[Translation] Failed to remove runtime translation message listener', error);
+            }
+        };
+    }, [hydrated, runTranslation, settings.defaultTargetLanguage]);
+
     useEffect(
         () => () => {
             if (copyResetRef.current) {
                 window.clearTimeout(copyResetRef.current);
             }
+            abortControllerRef.current?.abort();
         },
         []
     );
 
-    const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        if (!inputText.trim() || !targetLanguage) {
-            return;
-        }
-
-        setIsTranslating(true);
-        setTranslatedText('');
-        setLastRequestedLanguage(targetLanguage);
-
-        const abortController = new AbortController();
-
-        try {
-            const request: TranslationRequest = {
-                text: inputText,
-                targetLanguage,
-                sourceLanguage: 'auto'
-            };
-
-            // Use streaming to show results in real-time
-            await translate(settings, request, {
-                signal: abortController.signal,
-                onStream: (chunk) => {
-                    if (chunk.content) {
-                        setTranslatedText((prev) => prev + chunk.content);
-                    }
-                    if (chunk.error) {
-                        console.error('Translation error:', chunk.error);
-                    }
-                }
-            });
-        } catch (error) {
-            console.error('Translation failed:', error);
-            setTranslatedText(`Error: ${error instanceof Error ? error.message : 'Translation failed. Please check your settings and try again.'}`);
-        } finally {
-            setIsTranslating(false);
-        }
-    };
+    const handleSubmit = useCallback(
+        (event: FormEvent<HTMLFormElement>) => {
+            event.preventDefault();
+            void runTranslation(inputText, targetLanguage);
+        },
+        [inputText, runTranslation, targetLanguage]
+    );
 
     const handleCopy = async () => {
         if (!translatedText.trim()) return;

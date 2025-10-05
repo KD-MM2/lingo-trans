@@ -1,3 +1,4 @@
+import { browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
 import { translate } from '@src/lib/api';
 import {
@@ -8,7 +9,14 @@ import {
     SELECTION_TRANSLATION_CHUNK,
     SELECTION_TRANSLATION_COMPLETE,
     SELECTION_TRANSLATION_ERROR,
-    type SelectionTranslationPortRequest
+    CONTEXT_TRANSLATE_SELECTION,
+    CONTEXT_TRANSLATE_PAGE,
+    SIDE_PANEL_TRANSLATE_REQUEST,
+    SIDE_PANEL_TRANSLATE_STORAGE_KEY,
+    type SelectionTranslationPortRequest,
+    type ContextTranslateSelectionMessage,
+    type ContextTranslatePageMessage,
+    type SidePanelTranslateRequest
 } from '@src/lib/extension-messages';
 import { loadStoredSettings } from '@src/lib/settings-storage';
 import { DEFAULT_SETTINGS } from '@src/lib/settings';
@@ -40,10 +48,39 @@ type ChromeRuntimeApi = {
     lastError?: { message?: string };
 };
 
+type ChromeContextMenuOnClickInfo = {
+    menuItemId: string | number;
+    selectionText?: string;
+};
+
+type ChromeContextMenusApi = {
+    removeAll?: (callback?: () => void) => void | Promise<void>;
+    create?: (properties: { id?: string; title: string; contexts: string[]; parentId?: string }) => void | number | Promise<void | number>;
+    onClicked?: {
+        addListener: (callback: (info: ChromeContextMenuOnClickInfo, tab?: TabLike) => void) => void;
+    };
+};
+
+type ChromeTabsApi = {
+    sendMessage?: (tabId: number, message: unknown) => void | Promise<void>;
+};
+
+type ChromeStorageLocalApi = {
+    set?: (items: Record<string, unknown>) => void | Promise<void>;
+    remove?: (keys: string | string[]) => void | Promise<void>;
+};
+
+type ChromeStorageApi = {
+    local?: ChromeStorageLocalApi;
+};
+
 type ChromeApi = {
     sidePanel?: ChromeSidePanelApi;
     action?: ChromeActionApi;
     runtime?: ChromeRuntimeApi;
+    contextMenus?: ChromeContextMenusApi;
+    tabs?: ChromeTabsApi;
+    storage?: ChromeStorageApi;
     windows?: ChromeWindowsApi;
 };
 
@@ -94,6 +131,171 @@ type SidePanelTarget = { tabId?: number; windowId?: number };
 type PanelSession = { opened: boolean; lastTabId?: number };
 
 const panelStateByWindow = new Map<number, PanelSession>();
+
+const CONTEXT_MENU_SELECTION_POPUP = 'lingotrans:context:selection:popup';
+const CONTEXT_MENU_SELECTION_SIDEPANEL = 'lingotrans:context:selection:sidepanel';
+const CONTEXT_MENU_PAGE_INLINE = 'lingotrans:context:page:inline';
+const CONTEXT_MENU_PAGE_SIDEPANEL = 'lingotrans:context:page:sidepanel';
+
+const sendMessageToTab = async (tabId: number, message: ContextTranslateSelectionMessage | ContextTranslatePageMessage) => {
+    try {
+        const maybeResult = chromeApi?.tabs?.sendMessage?.(tabId, message);
+        if (isPromise(maybeResult)) {
+            await maybeResult;
+        }
+    } catch (error) {
+        console.debug('[LingoTrans] Failed to send message to tab', error);
+    }
+};
+
+const persistSidePanelPayload = async (payload: Omit<SidePanelTranslateRequest, 'type'> & { timestamp?: number }) => {
+    if (!chromeApi?.storage?.local?.set) {
+        return;
+    }
+
+    try {
+        const value = {
+            ...payload,
+            timestamp: payload.timestamp ?? Date.now()
+        } satisfies Record<string, unknown>;
+        await chromeApi.storage.local.set({
+            [SIDE_PANEL_TRANSLATE_STORAGE_KEY]: value
+        });
+    } catch (error) {
+        console.debug('[LingoTrans] Failed to persist side panel payload to storage', error);
+    }
+};
+
+const emitSidePanelPayload = async (payload: Omit<SidePanelTranslateRequest, 'type'>) => {
+    try {
+        await browser.runtime.sendMessage({
+            type: SIDE_PANEL_TRANSLATE_REQUEST,
+            ...payload
+        } satisfies SidePanelTranslateRequest);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error ?? 'Unknown runtime error');
+        if (!message.includes('Could not establish connection')) {
+            console.debug('[LingoTrans] Failed to emit side panel payload message', error);
+        }
+    }
+};
+
+const startSidePanelTranslation = async (target: SidePanelTarget | undefined, payload: Omit<SidePanelTranslateRequest, 'type'>) => {
+    const openPromise = openSidePanelForTarget(target, { forceOpen: true });
+
+    const enrichedPayload = {
+        ...payload,
+        timestamp: Date.now()
+    } satisfies Omit<SidePanelTranslateRequest, 'type'>;
+
+    try {
+        await persistSidePanelPayload(enrichedPayload);
+        await emitSidePanelPayload(enrichedPayload);
+    } catch (error) {
+        console.debug('[LingoTrans] Failed to prepare side panel translation payload', error);
+    } finally {
+        await openPromise;
+    }
+};
+
+let contextMenuClickRegistered = false;
+
+const handleContextMenuClick = (info: ChromeContextMenuOnClickInfo, tab: TabLike | undefined) => {
+    const menuId = typeof info.menuItemId === 'string' ? info.menuItemId : String(info.menuItemId);
+    const tabId = normalizeTabId(tab);
+    const windowId = normalizeWindowId(tab);
+    const target = tabId === undefined && windowId === undefined ? undefined : { tabId, windowId };
+    const selectionText = typeof info.selectionText === 'string' ? info.selectionText : '';
+
+    switch (menuId) {
+        case CONTEXT_MENU_SELECTION_POPUP: {
+            if (tabId === undefined) {
+                break;
+            }
+
+            const payload: ContextTranslateSelectionMessage = {
+                type: CONTEXT_TRANSLATE_SELECTION,
+                mode: 'popup',
+                text: selectionText
+            };
+
+            void sendMessageToTab(tabId, payload);
+            break;
+        }
+        case CONTEXT_MENU_SELECTION_SIDEPANEL: {
+            if (!selectionText.trim()) {
+                break;
+            }
+
+            void startSidePanelTranslation(target, {
+                text: selectionText,
+                source: 'selection'
+            });
+            break;
+        }
+        case CONTEXT_MENU_PAGE_INLINE: {
+            if (tabId === undefined) {
+                break;
+            }
+
+            const payload: ContextTranslatePageMessage = {
+                type: CONTEXT_TRANSLATE_PAGE,
+                mode: 'inline'
+            };
+
+            void sendMessageToTab(tabId, payload);
+            break;
+        }
+        case CONTEXT_MENU_PAGE_SIDEPANEL: {
+            const text = selectionText.trim();
+            void startSidePanelTranslation(target, {
+                text,
+                source: 'page'
+            });
+            break;
+        }
+        default:
+            break;
+    }
+};
+
+const registerContextMenus = () => {
+    const api = chromeApi?.contextMenus;
+    if (!api?.create) {
+        return;
+    }
+
+    const createMenus = () => {
+        try {
+            api.create?.({ id: CONTEXT_MENU_SELECTION_POPUP, title: 'Translate selection', contexts: ['selection'] });
+            api.create?.({ id: CONTEXT_MENU_SELECTION_SIDEPANEL, title: 'Translate selection in side panel', contexts: ['selection'] });
+            api.create?.({ id: CONTEXT_MENU_PAGE_INLINE, title: 'Translate page', contexts: ['page'] });
+            api.create?.({ id: CONTEXT_MENU_PAGE_SIDEPANEL, title: 'Translate page in side panel', contexts: ['page'] });
+        } catch (error) {
+            console.debug('[LingoTrans] Failed to create context menu items', error);
+        }
+
+        if (!contextMenuClickRegistered && api.onClicked?.addListener) {
+            contextMenuClickRegistered = true;
+            api.onClicked.addListener(handleContextMenuClick);
+        }
+    };
+
+    try {
+        const maybePromise = api.removeAll?.(createMenus);
+        if (isPromise(maybePromise)) {
+            void maybePromise.then(createMenus).catch((error) => {
+                console.debug('[LingoTrans] Failed to clear existing context menus', error);
+                createMenus();
+            });
+        } else if (!api.removeAll) {
+            createMenus();
+        }
+    } catch (error) {
+        console.debug('[LingoTrans] Unable to reset context menus', error);
+        createMenus();
+    }
+};
 
 const registerSelectionTranslationPort = () => {
     if (!chromeApi?.runtime?.onConnect) {
@@ -227,16 +429,26 @@ const registerSelectionTranslationPort = () => {
     });
 };
 
-const callSidePanelOpen = (args: { tabId: number } | { windowId: number }) => {
+const callSidePanelOpen = async (args: { tabId: number } | { windowId: number }): Promise<boolean> => {
+    if (!chromeApi?.sidePanel?.open) {
+        return Promise.resolve(false);
+    }
+
     try {
-        const maybeOpen = chromeApi?.sidePanel?.open?.(args);
+        const maybeOpen = chromeApi.sidePanel.open(args);
         if (isPromise(maybeOpen)) {
-            maybeOpen.catch((error: unknown) => {
-                console.warn('[LingoTrans] Failed to open the side panel', error);
-            });
+            return maybeOpen
+                .then(() => true)
+                .catch((error: unknown) => {
+                    console.warn('[LingoTrans] Failed to open the side panel', error);
+                    return false;
+                });
         }
+
+        return Promise.resolve(true);
     } catch (error) {
         console.warn('[LingoTrans] Failed to open the side panel', error);
+        return Promise.resolve(false);
     }
 };
 
@@ -256,72 +468,59 @@ const ensureSidePanelOptionsForTab = (tabId: number, enabled: boolean) => {
     }
 };
 
-const resolveTargetWindowId = (target: SidePanelTarget | undefined, callback: (windowId: number | undefined) => void) => {
-    if (target?.windowId !== undefined) {
-        callback(target.windowId);
-        return;
-    }
-
-    if (!chromeApi?.windows?.getCurrent) {
-        callback(undefined);
-        return;
-    }
-
-    try {
-        chromeApi.windows.getCurrent?.((window) => {
-            const currentWindowId = typeof window?.id === 'number' ? window.id : undefined;
-            callback(currentWindowId);
-        });
-    } catch (error) {
-        console.debug('[LingoTrans] Failed to resolve current window for side panel open', error);
-        callback(undefined);
-    }
-};
-
-const openSidePanelForTarget = (inputTarget?: SidePanelTarget) => {
+const openSidePanelForTarget = (inputTarget?: SidePanelTarget, options?: { forceOpen?: boolean }): Promise<boolean> => {
     if (!chromeApi?.sidePanel) {
-        return;
+        return Promise.resolve(false);
     }
 
-    resolveTargetWindowId(inputTarget, (resolvedWindowId) => {
-        const existingSession = resolvedWindowId !== undefined ? panelStateByWindow.get(resolvedWindowId) : undefined;
-        const candidateTabId = inputTarget?.tabId ?? existingSession?.lastTabId;
+    const resolvedWindowId = inputTarget?.windowId;
+    const existingSession = resolvedWindowId !== undefined ? panelStateByWindow.get(resolvedWindowId) : undefined;
+    const candidateTabId = inputTarget?.tabId ?? existingSession?.lastTabId;
+    const forceOpen = options?.forceOpen === true;
 
-        const shouldClose = existingSession?.opened === true;
+    const shouldClose = !forceOpen && existingSession?.opened === true;
 
-        if (shouldClose) {
-            if (candidateTabId !== undefined) {
-                ensureSidePanelOptionsForTab(candidateTabId, false);
-            }
-
-            if (resolvedWindowId !== undefined) {
-                panelStateByWindow.set(resolvedWindowId, {
-                    opened: false,
-                    lastTabId: candidateTabId
-                });
-            }
-
-            return;
-        }
-
+    if (shouldClose) {
         if (candidateTabId !== undefined) {
-            ensureSidePanelOptionsForTab(candidateTabId, true);
+            ensureSidePanelOptionsForTab(candidateTabId, false);
         }
-
-        const openArgs = resolvedWindowId !== undefined ? { windowId: resolvedWindowId } : candidateTabId !== undefined ? { tabId: candidateTabId } : undefined;
-        if (!openArgs) {
-            console.debug('[LingoTrans] Missing target information to open side panel');
-            return;
-        }
-
-        callSidePanelOpen(openArgs);
 
         if (resolvedWindowId !== undefined) {
             panelStateByWindow.set(resolvedWindowId, {
-                opened: true,
+                opened: false,
                 lastTabId: candidateTabId
             });
         }
+
+        return Promise.resolve(false);
+    }
+
+    if (candidateTabId !== undefined) {
+        ensureSidePanelOptionsForTab(candidateTabId, true);
+    }
+
+    const openArgs = resolvedWindowId !== undefined ? { windowId: resolvedWindowId } : candidateTabId !== undefined ? { tabId: candidateTabId } : undefined;
+    if (!openArgs) {
+        console.debug('[LingoTrans] Missing target information to open side panel');
+        return Promise.resolve(false);
+    }
+
+    if (resolvedWindowId !== undefined) {
+        panelStateByWindow.set(resolvedWindowId, {
+            opened: true,
+            lastTabId: candidateTabId
+        });
+    }
+
+    return callSidePanelOpen(openArgs).then((opened) => {
+        if (resolvedWindowId !== undefined) {
+            panelStateByWindow.set(resolvedWindowId, {
+                opened,
+                lastTabId: candidateTabId
+            });
+        }
+
+        return opened;
     });
 };
 
@@ -384,10 +583,12 @@ export default defineBackground(() => {
     registerActionClickHandler();
     registerMessageHandler();
     registerSelectionTranslationPort();
+    registerContextMenus();
 
     if (chromeApi.runtime?.onInstalled) {
         chromeApi.runtime.onInstalled.addListener(() => {
             registerActionBehavior();
+            registerContextMenus();
         });
     }
 });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, RefreshCw, RotateCcw, Save } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2, RefreshCw, RotateCcw, Save } from 'lucide-react';
 
 import { Button } from '@src/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@src/components/ui/card';
@@ -8,6 +8,7 @@ import { Label } from '@src/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@src/components/ui/select';
 import { Textarea } from '@src/components/ui/textarea';
 import { SUPPORTED_LANGUAGES } from '@src/lib/languages';
+import { fetchModels as fetchAvailableModels, healthCheck as runHealthCheck } from '@src/lib/api';
 import { DEFAULT_SETTINGS, MODEL_PROVIDERS, TEXT_SELECTION_BEHAVIORS, sanitizeCustomHeaders } from '@src/lib/settings';
 import { useSettings } from '@src/hooks/use-settings';
 import type { ModelProvider, Settings, TextSelectionBehavior } from '@src/types/settings';
@@ -100,15 +101,6 @@ const fromFormState = (form: SettingsFormState, customHeaders: Record<string, st
     } satisfies Settings;
 };
 
-const getModelEndpoint = (provider: ModelProvider, host: string) => {
-    if (provider === 'openai') return 'https://api.openai.com/v1/models';
-    if (provider === 'claude') return 'https://api.anthropic.com/v1/models';
-
-    const normalized = normalizeHost(host);
-    if (!normalized) return '';
-    return `${normalized}/models`;
-};
-
 export default function SettingsPage() {
     const { settings, hydrated, saveSettings, reloadSettings } = useSettings();
     const [formState, setFormState] = useState<SettingsFormState>(() => toFormState(settings));
@@ -118,6 +110,7 @@ export default function SettingsPage() {
     const [modelError, setModelError] = useState<string | null>(null);
     const [modelsLoading, setModelsLoading] = useState(false);
     const [saveFeedback, setSaveFeedback] = useState<'idle' | 'saved'>('idle');
+    const [healthStatus, setHealthStatus] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; message?: string }>({ state: 'idle' });
 
     useEffect(() => {
         if (!hydrated) return;
@@ -127,6 +120,7 @@ export default function SettingsPage() {
         setCustomHeadersError(null);
         setModelError(null);
         setModels(settings.model ? [settings.model] : []);
+        setHealthStatus({ state: 'idle' });
     }, [hydrated, settings]);
 
     useEffect(() => {
@@ -135,6 +129,12 @@ export default function SettingsPage() {
         const timeout = window.setTimeout(() => setSaveFeedback('idle'), 2500);
         return () => window.clearTimeout(timeout);
     }, [saveFeedback]);
+
+    useEffect(() => {
+        if (hasChanges) {
+            setHealthStatus({ state: 'idle' });
+        }
+    }, [hasChanges]);
 
     const handleFieldChange = <Key extends keyof SettingsFormState>(key: Key, value: SettingsFormState[Key]) => {
         setFormState((prev) => ({ ...prev, [key]: value }));
@@ -147,106 +147,48 @@ export default function SettingsPage() {
         setCustomHeadersError(error);
     };
 
-    const handleFetchModels = async () => {
+    const buildSettingsForRequest = () => {
         const { headers, error } = parseCustomHeadersJson(formState.customHeadersJson);
         if (error) {
             setCustomHeadersError(error);
+            return null;
+        }
+
+        setCustomHeadersError(null);
+        return fromFormState(formState, headers);
+    };
+
+    const handleFetchModels = async () => {
+        const nextSettings = buildSettingsForRequest();
+        if (!nextSettings) return;
+
+        const provider = nextSettings.modelProvider;
+
+        if (provider === 'openai' && !nextSettings.openaiApiKey) {
+            setModelError('OpenAI API key is required to fetch models.');
             return;
         }
 
-        const provider = formState.modelProvider;
-        const endpoint = getModelEndpoint(provider, formState.selfHostedHost);
+        if (provider === 'claude' && !nextSettings.claudeApiKey) {
+            setModelError('Claude API key is required to fetch models.');
+            return;
+        }
 
-        if (!endpoint) {
+        if (provider === 'self-hosted' && !nextSettings.selfHostedHost) {
             setModelError('Please provide a valid host URL for your self-hosted server (e.g. https://example.com/v1).');
             return;
-        }
-
-        const requestHeaders = new Headers();
-        for (const [key, value] of Object.entries(headers)) {
-            requestHeaders.set(key, value);
-        }
-
-        if (provider === 'openai') {
-            if (!formState.openaiApiKey.trim()) {
-                setModelError('OpenAI API key is required to fetch models.');
-                return;
-            }
-            requestHeaders.set('Authorization', `Bearer ${formState.openaiApiKey.trim()}`);
-        }
-
-        if (provider === 'claude') {
-            if (!formState.claudeApiKey.trim()) {
-                setModelError('Claude API key is required to fetch models.');
-                return;
-            }
-            requestHeaders.set('x-api-key', formState.claudeApiKey.trim());
-            if (!requestHeaders.has('anthropic-version')) {
-                requestHeaders.set('anthropic-version', '2023-06-01');
-            }
-        }
-
-        if (provider === 'self-hosted' && formState.selfHostedApiKey.trim()) {
-            requestHeaders.set('Authorization', `Bearer ${formState.selfHostedApiKey.trim()}`);
         }
 
         setModelsLoading(true);
         setModelError(null);
 
         try {
-            const response = await fetch(endpoint, {
-                method: 'GET',
-                headers: requestHeaders
-            });
+            const response = await fetchAvailableModels(nextSettings);
 
-            if (!response.ok) {
-                let message = `${response.status} ${response.statusText}`;
-                try {
-                    const body = (await response.json()) as { error?: { message?: string }; message?: string };
-                    if (body?.error?.message) message = body.error.message;
-                    else if (body?.message) message = body.message;
-                } catch (error) {
-                    console.warn('[settings] Failed to parse error response from model fetch:', error);
-                }
-
-                throw new Error(message);
-            }
-
-            let payload: unknown;
-            try {
-                payload = await response.json();
-            } catch {
-                throw new Error('Failed to parse model list response as JSON.');
-            }
-
-            const collected = new Set<string>();
-
-            if (payload && typeof payload === 'object') {
-                const record = payload as Record<string, unknown>;
-                if (Array.isArray(record.data)) {
-                    for (const item of record.data) {
-                        if (typeof item === 'string') {
-                            collected.add(item);
-                        } else if (item && typeof item === 'object' && typeof (item as { id?: unknown }).id === 'string') {
-                            collected.add((item as { id: string }).id.trim());
-                        }
-                    }
-                }
-
-                if (Array.isArray(record.models)) {
-                    for (const item of record.models) {
-                        if (typeof item === 'string') collected.add(item.trim());
-                    }
-                }
-            }
-
-            if (Array.isArray(payload)) {
-                for (const item of payload) {
-                    if (typeof item === 'string') collected.add(item.trim());
-                }
-            }
-
-            const nextModels = Array.from(collected).filter(Boolean).sort();
+            const nextModels = (response.models || [])
+                .map((model) => model?.id?.trim())
+                .filter((id): id is string => Boolean(id))
+                .sort((a, b) => a.localeCompare(b));
 
             if (!nextModels.length) {
                 setModelError('Received an empty model list. Try adjusting your credentials or endpoint.');
@@ -255,13 +197,60 @@ export default function SettingsPage() {
             }
 
             setModels(nextModels);
-            if (!nextModels.includes(formState.model)) {
+            if (!nextSettings.model || !nextModels.includes(nextSettings.model)) {
                 handleFieldChange('model', nextModels[0]);
             }
         } catch (error) {
             setModelError(error instanceof Error ? error.message : 'Unexpected error while fetching models.');
         } finally {
             setModelsLoading(false);
+        }
+    };
+
+    const handleHealthCheck = async () => {
+        const nextSettings = buildSettingsForRequest();
+        if (!nextSettings) {
+            setHealthStatus({ state: 'error', message: 'Fix custom headers JSON before running health check.' });
+            return;
+        }
+
+        const provider = nextSettings.modelProvider;
+
+        if (provider === 'openai' && !nextSettings.openaiApiKey) {
+            setHealthStatus({ state: 'error', message: 'OpenAI API key is required to run the health check.' });
+            return;
+        }
+
+        if (provider === 'claude' && !nextSettings.claudeApiKey) {
+            setHealthStatus({ state: 'error', message: 'Claude API key is required to run the health check.' });
+            return;
+        }
+
+        if (provider === 'self-hosted' && !nextSettings.selfHostedHost) {
+            setHealthStatus({ state: 'error', message: 'Provide a valid host URL before running the health check.' });
+            return;
+        }
+
+        if (!nextSettings.model) {
+            setHealthStatus({ state: 'error', message: 'Select a model before running the health check.' });
+            return;
+        }
+
+        setHealthStatus({ state: 'checking' });
+
+        try {
+            const result = await runHealthCheck(nextSettings);
+
+            if (result.ok) {
+                setHealthStatus({ state: 'ok', message: result.message || 'Connection successful.' });
+            } else {
+                setHealthStatus({ state: 'error', message: result.message || 'Connection failed.' });
+            }
+        } catch (error) {
+            setHealthStatus({
+                state: 'error',
+                message: error instanceof Error ? error.message : 'Health check failed. Try again in a moment.'
+            });
         }
     };
 
@@ -286,6 +275,19 @@ export default function SettingsPage() {
     };
 
     const canFetchModels = formState.modelProvider !== 'self-hosted' || Boolean(formState.selfHostedHost.trim());
+    const hasProviderCredentials = (() => {
+        switch (formState.modelProvider) {
+            case 'openai':
+                return Boolean(formState.openaiApiKey.trim());
+            case 'claude':
+                return Boolean(formState.claudeApiKey.trim());
+            case 'self-hosted':
+                return Boolean(formState.selfHostedHost.trim());
+            default:
+                return false;
+        }
+    })();
+    const canRunHealthCheck = Boolean(formState.model.trim()) && hasProviderCredentials;
     const canSave = hydrated && !customHeadersError && hasChanges;
 
     const languageOptions = useMemo(
@@ -394,7 +396,42 @@ export default function SettingsPage() {
                                         </>
                                     )}
                                 </Button>
-                                {formState.modelProvider === 'self-hosted' && !formState.selfHostedHost.trim() && <p className="text-muted-foreground text-xs">Provide your self-hosted endpoint before fetching models.</p>}
+                                <Button type="button" variant="outline" onClick={handleHealthCheck} disabled={!canRunHealthCheck || healthStatus.state === 'checking'}>
+                                    {healthStatus.state === 'checking' ? (
+                                        <>
+                                            <Loader2 className="size-4 animate-spin" />
+                                            Checking…
+                                        </>
+                                    ) : (
+                                        <>
+                                            <RefreshCw className="size-4" />
+                                            Run health check
+                                        </>
+                                    )}
+                                </Button>
+                            </div>
+                            {formState.modelProvider === 'self-hosted' && !formState.selfHostedHost.trim() && <p className="text-muted-foreground text-xs">Provide your self-hosted endpoint before fetching models or running the health check.</p>}
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                                {healthStatus.state === 'checking' && (
+                                    <span className="text-muted-foreground flex items-center gap-1">
+                                        <Loader2 className="size-3 animate-spin" />
+                                        Verifying connection…
+                                    </span>
+                                )}
+                                {healthStatus.state === 'ok' && (
+                                    <span className="text-emerald-600 flex items-center gap-1">
+                                        <CheckCircle2 className="size-3" />
+                                        {healthStatus.message ?? 'Connection successful.'}
+                                    </span>
+                                )}
+                                {healthStatus.state === 'error' && (
+                                    <span className="text-destructive flex items-center gap-1">
+                                        <AlertCircle className="size-3" />
+                                        {healthStatus.message ?? 'Connection failed. Please review your settings.'}
+                                    </span>
+                                )}
+                                {healthStatus.state === 'idle' && !canRunHealthCheck && <span className="text-muted-foreground">Enter your credentials and choose a model to enable the health check.</span>}
+                                {healthStatus.state === 'idle' && canRunHealthCheck && <span className="text-muted-foreground">Run the health check to verify your credentials.</span>}
                             </div>
                         </CardContent>
                     </Card>
