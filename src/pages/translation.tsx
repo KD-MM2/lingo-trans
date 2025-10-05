@@ -9,6 +9,8 @@ import { Textarea } from '@src/components/ui/textarea';
 import { SUPPORTED_LANGUAGES, resolveLanguageLabel } from '@src/lib/languages';
 import { DEFAULT_SETTINGS } from '@src/lib/settings';
 import { useSettings } from '@src/hooks/use-settings';
+import { translate } from '@src/lib/api';
+import type { TranslationRequest } from '@src/lib/api/types';
 
 const MAX_CHARACTERS = 5000;
 
@@ -55,9 +57,30 @@ export default function Translation() {
         setTranslatedText('');
         setLastRequestedLanguage(targetLanguage);
 
+        const abortController = new AbortController();
+
         try {
-            await new Promise((resolve) => window.setTimeout(resolve, 350));
-            setTranslatedText(inputText);
+            const request: TranslationRequest = {
+                text: inputText,
+                targetLanguage,
+                sourceLanguage: 'auto'
+            };
+
+            // Use streaming to show results in real-time
+            await translate(settings, request, {
+                signal: abortController.signal,
+                onStream: (chunk) => {
+                    if (chunk.content) {
+                        setTranslatedText((prev) => prev + chunk.content);
+                    }
+                    if (chunk.error) {
+                        console.error('Translation error:', chunk.error);
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Translation failed:', error);
+            setTranslatedText(`Error: ${error instanceof Error ? error.message : 'Translation failed. Please check your settings and try again.'}`);
         } finally {
             setIsTranslating(false);
         }
@@ -120,7 +143,6 @@ export default function Translation() {
                                 </div>
                             </div>
                             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                <p className="text-muted-foreground text-xs">Translation is simulated for now. Integrate your provider to get real results.</p>
                                 <Button type="submit" className="min-w-32" disabled={disableSubmit}>
                                     {isTranslating ? 'Translating…' : 'Translate'}
                                 </Button>

@@ -9,13 +9,23 @@ import { Textarea } from '@src/components/ui/textarea';
 import { SUPPORTED_LANGUAGES, resolveLanguageLabel } from '@src/lib/languages';
 import { DEFAULT_SETTINGS } from '@src/lib/settings';
 import { useSettings } from '@src/hooks/use-settings';
+import { rewrite } from '@src/lib/api';
+import type { RewritingRequest } from '@src/lib/api/types';
 
 const MAX_CHARACTERS = 5000;
+
+const TONE_OPTIONS = [
+    { value: 'neutral', label: 'Neutral' },
+    { value: 'formal', label: 'Formal' },
+    { value: 'casual', label: 'Casual' },
+    { value: 'concise', label: 'Concise' }
+] as const;
 
 export default function Rewriting() {
     const { settings, hydrated } = useSettings();
     const defaultLanguageRef = useRef(DEFAULT_SETTINGS.defaultTargetLanguage);
     const [targetLanguage, setTargetLanguage] = useState(DEFAULT_SETTINGS.defaultTargetLanguage);
+    const [tone, setTone] = useState<'neutral' | 'formal' | 'casual' | 'concise'>('neutral');
     const [inputText, setInputText] = useState('');
     const [rewrittenText, setRewrittenText] = useState('');
     const [lastRequestedLanguage, setLastRequestedLanguage] = useState<string | null>(null);
@@ -55,9 +65,30 @@ export default function Rewriting() {
         setRewrittenText('');
         setLastRequestedLanguage(targetLanguage);
 
+        const abortController = new AbortController();
+
         try {
-            await new Promise((resolve) => window.setTimeout(resolve, 350));
-            setRewrittenText(inputText);
+            const request: RewritingRequest = {
+                text: inputText,
+                targetLanguage,
+                tone
+            };
+
+            // Use streaming to show results in real-time
+            await rewrite(settings, request, {
+                signal: abortController.signal,
+                onStream: (chunk) => {
+                    if (chunk.content) {
+                        setRewrittenText((prev) => prev + chunk.content);
+                    }
+                    if (chunk.error) {
+                        console.error('Rewriting error:', chunk.error);
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Rewriting failed:', error);
+            setRewrittenText(`Error: ${error instanceof Error ? error.message : 'Rewriting failed. Please check your settings and try again.'}`);
         } finally {
             setIsRewriting(false);
         }
@@ -112,15 +143,29 @@ export default function Rewriting() {
                                     </Select>
                                 </div>
                                 <div className="grid gap-2">
-                                    <Label htmlFor="source-text">Text to translate</Label>
-                                    <Textarea id="source-text" value={inputText} maxLength={MAX_CHARACTERS} placeholder="Paste or type the content you want translated." onChange={(event) => setInputText(event.target.value)} />
+                                    <Label htmlFor="tone">Tone</Label>
+                                    <Select value={tone} onValueChange={(value) => setTone(value as typeof tone)}>
+                                        <SelectTrigger id="tone" className="w-full sm:w-64">
+                                            <SelectValue placeholder="Choose tone" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {TONE_OPTIONS.map((option) => (
+                                                <SelectItem key={option.value} value={option.value}>
+                                                    {option.label}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="source-text">Text to rewrite</Label>
+                                    <Textarea id="source-text" value={inputText} maxLength={MAX_CHARACTERS} placeholder="Paste or type the content you want rewritten." onChange={(event) => setInputText(event.target.value)} />
                                     <p className={`text-xs text-right ${charactersRemaining <= 0 ? 'text-destructive' : 'text-muted-foreground'}`}>
                                         {charactersUsed.toLocaleString()} / {MAX_CHARACTERS.toLocaleString()} characters
                                     </p>
                                 </div>
                             </div>
                             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                <p className="text-muted-foreground text-xs">Rewriting is simulated for now. Integrate your provider to get real results.</p>
                                 <Button type="submit" className="min-w-32" disabled={disableSubmit}>
                                     {isRewriting ? 'Rewriting…' : 'Rewrite'}
                                 </Button>

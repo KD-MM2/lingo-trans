@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Link, useLocation } from 'react-router';
 
 // import { SearchForm } from '@src/components/search-form';
-import { ServerSwitcher, type ServerOption } from '@src/components/server-switcher';
+import { ProviderSwitcher, type ProviderOption } from '@src/components/provider-switcher';
 import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@src/components/ui/sidebar';
 import type { ModelProvider } from '@src/types/settings';
 
@@ -16,14 +16,14 @@ export type NavSection = {
     }>;
 };
 
-const serverOptions: Record<ModelProvider, ServerOption> = {
+const providerOptions: Record<ModelProvider, ProviderOption> = {
     openai: { label: 'OpenAI', value: 'openai' },
     claude: { label: 'Claude', value: 'claude' },
     'self-hosted': { label: 'Self-hosted', value: 'self-hosted' }
 };
 
-export const sidebarData: { servers: ServerOption[]; navMain: NavSection[] } = {
-    servers: [serverOptions.openai, serverOptions.claude, serverOptions['self-hosted']],
+export const sidebarData: { providers: ProviderOption[]; navMain: NavSection[] } = {
+    providers: [providerOptions.openai, providerOptions.claude, providerOptions['self-hosted']],
     navMain: [
         {
             title: 'Tools',
@@ -75,7 +75,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     return (
         <Sidebar {...props}>
             <SidebarHeader>
-                <ServerSwitcher servers={sidebarData.servers} defaultServer={serverOptions.openai.value} />
+                <ProviderSwitcher providers={sidebarData.providers} defaultProvider={providerOptions.openai.value} />
                 {/* <SearchForm /> */}
             </SidebarHeader>
             <SidebarContent>

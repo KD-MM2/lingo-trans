@@ -276,7 +276,7 @@ export default function SettingsPage() {
         saveSettings(next);
         setHasChanges(false);
         setSaveFeedback('saved');
-        reloadSettings();
+        void reloadSettings();
     };
 
     const handleResetForm = () => {
@@ -494,10 +494,11 @@ export default function SettingsPage() {
                             type="button"
                             variant="ghost"
                             onClick={() => {
-                                const latest = reloadSettings();
-                                setFormState(toFormState(latest));
-                                setModels(latest.model ? [latest.model] : []);
-                                setHasChanges(false);
+                                void reloadSettings().then((latest) => {
+                                    setFormState(toFormState(latest));
+                                    setModels(latest.model ? [latest.model] : []);
+                                    setHasChanges(false);
+                                });
                             }}
                         >
                             <RefreshCw className="size-4" />

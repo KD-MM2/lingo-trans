@@ -1,5 +1,17 @@
 import { defineBackground } from 'wxt/utils/define-background';
-import { isOpenSidePanelMessage } from '@src/lib/extension-messages';
+import { translate } from '@src/lib/api';
+import {
+    isOpenSidePanelMessage,
+    SELECTION_TRANSLATION_PORT,
+    START_SELECTION_TRANSLATION,
+    CANCEL_SELECTION_TRANSLATION,
+    SELECTION_TRANSLATION_CHUNK,
+    SELECTION_TRANSLATION_COMPLETE,
+    SELECTION_TRANSLATION_ERROR,
+    type SelectionTranslationPortRequest
+} from '@src/lib/extension-messages';
+import { loadStoredSettings } from '@src/lib/settings-storage';
+import { DEFAULT_SETTINGS } from '@src/lib/settings';
 
 const SIDE_PANEL_PATH = 'sidepanel.html';
 
@@ -22,6 +34,9 @@ type ChromeRuntimeApi = {
     onInstalled?: {
         addListener: (callback: () => void) => void;
     };
+    onConnect?: {
+        addListener: (callback: (port: RuntimePortLike) => void) => void;
+    };
     lastError?: { message?: string };
 };
 
@@ -37,6 +52,18 @@ const chromeApi = (globalThis as typeof globalThis & { chrome?: ChromeApi }).chr
 type TabLike = { id?: number | null; windowId?: number | null };
 
 type MessageSenderLike = { tab?: TabLike | undefined };
+
+type RuntimePortLike = {
+    name: string;
+    postMessage: (message: unknown) => void;
+    onMessage?: {
+        addListener: (callback: (message: unknown) => void) => void;
+    };
+    onDisconnect?: {
+        addListener: (callback: () => void) => void;
+    };
+    disconnect?: () => void;
+};
 
 type WindowLike = { id?: number | null };
 
@@ -67,6 +94,138 @@ type SidePanelTarget = { tabId?: number; windowId?: number };
 type PanelSession = { opened: boolean; lastTabId?: number };
 
 const panelStateByWindow = new Map<number, PanelSession>();
+
+const registerSelectionTranslationPort = () => {
+    if (!chromeApi?.runtime?.onConnect) {
+        return;
+    }
+
+    chromeApi.runtime.onConnect.addListener((port) => {
+        if (!port || port.name !== SELECTION_TRANSLATION_PORT) {
+            return;
+        }
+
+        let portClosed = false;
+        const activeControllers = new Map<string, AbortController>();
+
+        const postSafeMessage = (message: unknown) => {
+            if (portClosed) {
+                return;
+            }
+            try {
+                port.postMessage(message);
+            } catch (error) {
+                console.debug('[LingoTrans] Failed to post selection translation message', error);
+            }
+        };
+
+        const handleStart = async (payload: Extract<SelectionTranslationPortRequest, { type: typeof START_SELECTION_TRANSLATION }>) => {
+            const { requestId, text, targetLanguage } = payload;
+            const controller = new AbortController();
+            activeControllers.set(requestId, controller);
+
+            let fullContent = '';
+
+            try {
+                const storedSettings = await loadStoredSettings();
+                const safeSettings = storedSettings ?? { ...DEFAULT_SETTINGS };
+                const effectiveTargetLanguage = targetLanguage || safeSettings.defaultTargetLanguage || DEFAULT_SETTINGS.defaultTargetLanguage;
+
+                const response = await translate(
+                    safeSettings,
+                    { text, targetLanguage: effectiveTargetLanguage },
+                    {
+                        signal: controller.signal,
+                        onStream: (chunk) => {
+                            if (controller.signal.aborted || portClosed) {
+                                return;
+                            }
+
+                            if (chunk.content) {
+                                fullContent += chunk.content;
+                            }
+
+                            postSafeMessage({
+                                type: SELECTION_TRANSLATION_CHUNK,
+                                requestId,
+                                content: chunk.content,
+                                done: chunk.done,
+                                error: chunk.error
+                            });
+
+                            if (chunk.error) {
+                                controller.abort();
+                            }
+                        }
+                    }
+                );
+
+                if (controller.signal.aborted || portClosed) {
+                    return;
+                }
+
+                const finalContent = response.content || fullContent;
+
+                postSafeMessage({
+                    type: SELECTION_TRANSLATION_COMPLETE,
+                    requestId,
+                    content: finalContent
+                });
+            } catch (error) {
+                if (controller.signal.aborted || portClosed) {
+                    return;
+                }
+
+                const message = error instanceof Error ? error.message : String(error ?? 'Translation failed');
+
+                postSafeMessage({
+                    type: SELECTION_TRANSLATION_ERROR,
+                    requestId,
+                    message
+                });
+            } finally {
+                activeControllers.delete(requestId);
+            }
+        };
+
+        const handleCancel = (payload: Extract<SelectionTranslationPortRequest, { type: typeof CANCEL_SELECTION_TRANSLATION }>) => {
+            const entry = activeControllers.get(payload.requestId);
+            if (entry) {
+                entry.abort();
+                activeControllers.delete(payload.requestId);
+            }
+        };
+
+        const handlePortMessage = (raw: SelectionTranslationPortRequest) => {
+            if (!raw || typeof raw !== 'object') {
+                return;
+            }
+
+            switch (raw.type) {
+                case START_SELECTION_TRANSLATION:
+                    void handleStart(raw);
+                    break;
+                case CANCEL_SELECTION_TRANSLATION:
+                    handleCancel(raw);
+                    break;
+                default:
+                    break;
+            }
+        };
+
+        try {
+            port.onMessage?.addListener?.(handlePortMessage as (message: unknown) => void);
+        } catch (error) {
+            console.debug('[LingoTrans] Unable to listen for selection translation port messages', error);
+        }
+
+        port.onDisconnect?.addListener?.(() => {
+            portClosed = true;
+            activeControllers.forEach((controller) => controller.abort());
+            activeControllers.clear();
+        });
+    });
+};
 
 const callSidePanelOpen = (args: { tabId: number } | { windowId: number }) => {
     try {
@@ -224,6 +383,7 @@ export default defineBackground(() => {
     registerActionBehavior();
     registerActionClickHandler();
     registerMessageHandler();
+    registerSelectionTranslationPort();
 
     if (chromeApi.runtime?.onInstalled) {
         chromeApi.runtime.onInstalled.addListener(() => {

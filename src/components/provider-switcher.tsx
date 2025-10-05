@@ -3,42 +3,51 @@ import { Check, ChevronsUpDown, GalleryVerticalEnd } from 'lucide-react';
 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@src/components/ui/dropdown-menu';
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@src/components/ui/sidebar';
-import { Separator } from './ui/separator';
+// import { Separator } from './ui/separator';
 import { useSettings } from '@src/hooks/use-settings';
 import type { ModelProvider } from '@src/types/settings';
 
-export type ServerOption = {
+export type ProviderOption = {
     label: string;
     value: ModelProvider;
 };
 
-export function ServerSwitcher({ servers, defaultServer }: { servers: ServerOption[]; defaultServer: ModelProvider }) {
+export function ProviderSwitcher({ providers, defaultProvider }: { providers: ProviderOption[]; defaultProvider: ModelProvider }) {
     const { settings, hydrated, saveSettings } = useSettings();
 
     const [selectedProvider, setSelectedProvider] = React.useState<ModelProvider>(() => {
-        const fallback = servers[0]?.value ?? defaultServer;
-        return servers.some((option) => option.value === defaultServer) ? defaultServer : fallback;
+        const fallback = providers[0]?.value ?? defaultProvider;
+        return providers.some((option) => option.value === defaultProvider) ? defaultProvider : fallback;
     });
 
     React.useEffect(() => {
         if (!hydrated) return;
 
-        const fallback = servers[0]?.value ?? defaultServer;
-        const next = servers.some((option) => option.value === settings.modelProvider) ? settings.modelProvider : fallback;
+        const fallback = providers[0]?.value ?? defaultProvider;
+        const next = providers.some((option) => option.value === settings.modelProvider) ? settings.modelProvider : fallback;
         setSelectedProvider(next);
-    }, [hydrated, settings.modelProvider, servers, defaultServer]);
+    }, [hydrated, settings.modelProvider, providers, defaultProvider]);
 
-    const selectedOption = servers.find((option) => option.value === selectedProvider) ?? servers[0];
-    const hasServers = servers.length > 0;
-    const displayLabel = hasServers ? (selectedOption?.label ?? 'Unknown') : 'No servers';
+    const selectedOption = providers.find((option) => option.value === selectedProvider) ?? providers[0];
+    const hasProviders = providers.length > 0;
+    const displayLabel = hasProviders ? (selectedOption?.label ?? 'Unknown') : 'No providers';
 
     const handleSelect = (provider: ModelProvider) => {
-        if (!hasServers) return;
+        if (!hasProviders) return;
         if (provider === selectedProvider) return;
+
         setSelectedProvider(provider);
+
         saveSettings((current) => {
-            if (current.modelProvider === provider) return current;
-            return { ...current, modelProvider: provider };
+            if (current.modelProvider === provider) {
+                return current;
+            }
+
+            return {
+                ...current,
+                modelProvider: provider,
+                model: ''
+            };
         });
     };
 
@@ -52,25 +61,25 @@ export function ServerSwitcher({ servers, defaultServer }: { servers: ServerOpti
                                 <GalleryVerticalEnd className="size-4" />
                             </div>
                             <div className="flex flex-col gap-0.5 leading-none">
-                                <span className="font-medium">Servers</span>
+                                <span className="font-medium">Providers</span>
                                 <span className="">{displayLabel}</span>
                             </div>
-                            {hasServers && <ChevronsUpDown className="ml-auto" />}
+                            {hasProviders && <ChevronsUpDown className="ml-auto" />}
                         </SidebarMenuButton>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent className="w-(--radix-dropdown-menu-trigger-width)" align="start">
-                        {servers.map((server) => {
-                            const isActive = server.value === selectedProvider;
+                        {providers.map((provider) => {
+                            const isActive = provider.value === selectedProvider;
                             return (
-                                <DropdownMenuItem key={server.value} onSelect={() => handleSelect(server.value)}>
-                                    {server.label} {isActive && <Check className="ml-auto" />}
+                                <DropdownMenuItem key={provider.value} onSelect={() => handleSelect(provider.value)}>
+                                    {provider.label} {isActive && <Check className="ml-auto" />}
                                 </DropdownMenuItem>
                             );
                         })}
-                        <Separator className="my-1" />
+                        {/* <Separator className="my-1" />
                         <DropdownMenuItem key="add-new-server" onSelect={() => alert('Add new server')}>
                             Add new server
-                        </DropdownMenuItem>
+                        </DropdownMenuItem> */}
                     </DropdownMenuContent>
                 </DropdownMenu>
             </SidebarMenuItem>
