@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router';
 
 // import { SearchForm } from '@src/components/search-form';
 import { ProviderSwitcher, type ProviderOption } from '@src/components/provider-switcher';
-import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@src/components/ui/sidebar';
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail, useSidebar } from '@src/components/ui/sidebar';
 import type { ModelProvider } from '@src/types/settings';
 
 // This is sample data.
@@ -60,6 +60,7 @@ export const sidebarData: { providers: ProviderOption[]; navMain: NavSection[] }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const location = useLocation();
+    const { isMobile, setOpenMobile } = useSidebar();
 
     const isActive = React.useCallback(
         (itemUrl: string) => {
@@ -71,6 +72,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         },
         [location.pathname]
     );
+
+    const handleNavItemClick = React.useCallback(() => {
+        if (isMobile) {
+            setOpenMobile(false);
+        }
+    }, [isMobile, setOpenMobile]);
 
     return (
         <Sidebar {...props}>
@@ -87,7 +94,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                             <SidebarMenu>
                                 {item.items.map((navItem) => (
                                     <SidebarMenuItem key={navItem.title}>
-                                        <SidebarMenuButton asChild isActive={isActive(navItem.url)}>
+                                        <SidebarMenuButton asChild isActive={isActive(navItem.url)} onClick={handleNavItemClick}>
                                             <Link to={navItem.url} aria-current={isActive(navItem.url) ? 'page' : undefined}>
                                                 {navItem.title}
                                             </Link>
