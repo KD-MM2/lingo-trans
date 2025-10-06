@@ -21,6 +21,7 @@ export interface TranslationRequest {
     sourceLanguage?: string;
     template?: string;
     preserveHtml?: boolean;
+    preservePlaceholders?: boolean;
     glossary?: Record<string, string>;
 }
 

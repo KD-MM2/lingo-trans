@@ -322,7 +322,7 @@ const registerSelectionTranslationPort = () => {
         };
 
         const handleStart = async (payload: Extract<SelectionTranslationPortRequest, { type: typeof START_SELECTION_TRANSLATION }>) => {
-            const { requestId, text, targetLanguage } = payload;
+            const { requestId, text, targetLanguage, sourceLanguage, preserveHtml, preservePlaceholders, glossary } = payload;
             const controller = new AbortController();
             activeControllers.set(requestId, controller);
 
@@ -332,35 +332,39 @@ const registerSelectionTranslationPort = () => {
                 const storedSettings = await loadStoredSettings();
                 const safeSettings = storedSettings ?? { ...DEFAULT_SETTINGS };
                 const effectiveTargetLanguage = targetLanguage || safeSettings.defaultTargetLanguage || DEFAULT_SETTINGS.defaultTargetLanguage;
+                const translationRequest = {
+                    text,
+                    targetLanguage: effectiveTargetLanguage,
+                    sourceLanguage: sourceLanguage || 'auto',
+                    preserveHtml,
+                    preservePlaceholders,
+                    glossary
+                };
 
-                const response = await translate(
-                    safeSettings,
-                    { text, targetLanguage: effectiveTargetLanguage },
-                    {
-                        signal: controller.signal,
-                        onStream: (chunk) => {
-                            if (controller.signal.aborted || portClosed) {
-                                return;
-                            }
+                const response = await translate(safeSettings, translationRequest, {
+                    signal: controller.signal,
+                    onStream: (chunk) => {
+                        if (controller.signal.aborted || portClosed) {
+                            return;
+                        }
 
-                            if (chunk.content) {
-                                fullContent += chunk.content;
-                            }
+                        if (chunk.content) {
+                            fullContent += chunk.content;
+                        }
 
-                            postSafeMessage({
-                                type: SELECTION_TRANSLATION_CHUNK,
-                                requestId,
-                                content: chunk.content,
-                                done: chunk.done,
-                                error: chunk.error
-                            });
+                        postSafeMessage({
+                            type: SELECTION_TRANSLATION_CHUNK,
+                            requestId,
+                            content: chunk.content,
+                            done: chunk.done,
+                            error: chunk.error
+                        });
 
-                            if (chunk.error) {
-                                controller.abort();
-                            }
+                        if (chunk.error) {
+                            controller.abort();
                         }
                     }
-                );
+                });
 
                 if (controller.signal.aborted || portClosed) {
                     return;

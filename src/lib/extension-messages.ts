@@ -49,6 +49,10 @@ export type SelectionTranslationStart = {
     requestId: string;
     text: string;
     targetLanguage: string;
+    sourceLanguage?: string;
+    preserveHtml?: boolean;
+    preservePlaceholders?: boolean;
+    glossary?: Record<string, string>;
 };
 
 export type SelectionTranslationCancel = {

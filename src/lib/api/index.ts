@@ -153,6 +153,10 @@ function buildTranslationPrompt(request: TranslationRequest): string {
         prompt += 'IMPORTANT: Preserve all HTML tags and attributes exactly as they are. Only translate the text content between tags.\n\n';
     }
 
+    if (request.preservePlaceholders) {
+        prompt += 'IMPORTANT: The text includes placeholder tokens like [[t0]] and [[/t0]]. Keep every token exactly as-is, without translating, removing, or reordering them.\n\n';
+    }
+
     prompt += 'Instructions:\n';
     prompt += '- Maintain the original meaning, tone, and punctuation\n';
     prompt += '- Do not add explanations or comments\n';

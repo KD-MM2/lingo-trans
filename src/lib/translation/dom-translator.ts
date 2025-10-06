@@ -1,0 +1,165 @@
+const PRESERVE_TAGS = new Set(['A', 'EM', 'STRONG', 'CODE', 'SPAN', 'SUP', 'SUB', 'MARK']);
+
+const BLOCK_TAGS = new Set(['P', 'LI', 'DT', 'DD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'CAPTION', 'FIGCAPTION', 'TD', 'TH', 'PRE', 'DIV']);
+
+const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'MATH']);
+
+export type TokenMap = Record<string, { tag: string; attrs: Array<[string, string]> }>;
+
+export interface TranslatableBlock {
+    element: Element;
+    originalHTML: string;
+    segment: string;
+    tokenMap: TokenMap;
+}
+
+const BLOCK_SELECTOR = Array.from(BLOCK_TAGS)
+    .map((tag) => tag.toLowerCase())
+    .join(',');
+
+export function collectTranslatableBlocks(root: HTMLElement): TranslatableBlock[] {
+    const candidates = Array.from(root.querySelectorAll<HTMLElement>(BLOCK_SELECTOR));
+    if (root.matches?.(BLOCK_SELECTOR)) {
+        candidates.unshift(root);
+    }
+
+    const selected: HTMLElement[] = [];
+
+    const blocks: TranslatableBlock[] = [];
+
+    for (const element of candidates) {
+        if (selected.some((parent) => parent !== element && parent.contains(element))) {
+            continue;
+        }
+
+        if (!element.innerText.trim()) {
+            continue;
+        }
+
+        if (element.closest('[aria-hidden="true"], [hidden]')) {
+            continue;
+        }
+
+        const { segment, tokenMap } = serializeWithPlaceholders(element);
+        if (!segment.trim()) {
+            continue;
+        }
+
+        blocks.push({
+            element,
+            originalHTML: element.innerHTML,
+            segment,
+            tokenMap
+        });
+
+        selected.push(element);
+    }
+
+    return blocks;
+}
+
+export function serializeWithPlaceholders(el: Element): { segment: string; tokenMap: TokenMap } {
+    let counter = 0;
+    const tokenMap: TokenMap = {};
+    let output = '';
+
+    const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            output += node.nodeValue ?? '';
+            return;
+        }
+
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return;
+        }
+
+        const element = node as Element;
+
+        if (SKIP_TAGS.has(element.tagName)) {
+            return;
+        }
+
+        if (PRESERVE_TAGS.has(element.tagName)) {
+            const tokenId = `t${counter++}`;
+            tokenMap[tokenId] = {
+                tag: element.tagName.toLowerCase(),
+                attrs: Array.from(element.attributes).map((attr) => [attr.name, attr.value])
+            };
+            output += `[[${tokenId}]]`;
+            Array.from(element.childNodes).forEach((child) => walk(child));
+            output += `[[/${tokenId}]]`;
+            return;
+        }
+
+        if (element.tagName === 'BR') {
+            output += '\n';
+            return;
+        }
+
+        Array.from(element.childNodes).forEach((child) => walk(child));
+    };
+
+    Array.from(el.childNodes).forEach((child) => walk(child));
+
+    return { segment: output, tokenMap };
+}
+
+export function reconstructHTMLFromTranslation(target: Element, translated: string, tokenMap: TokenMap) {
+    const fragment = document.createDocumentFragment();
+    const stack: Element[] = [];
+    let cursor: Node = fragment;
+    let lastIndex = 0;
+    const tokenRegex = /\[\[(\/?)(t\d+)]]/g;
+
+    const appendText = (value: string) => {
+        if (!value) {
+            return;
+        }
+        const text = document.createTextNode(value);
+        (cursor as Element | DocumentFragment).appendChild(text);
+    };
+
+    let match: RegExpExecArray | null;
+    while ((match = tokenRegex.exec(translated)) !== null) {
+        appendText(translated.slice(lastIndex, match.index));
+        lastIndex = tokenRegex.lastIndex;
+
+        const isClosing = match[1] === '/';
+        const key = match[2];
+        const meta = tokenMap[key];
+        if (!meta) {
+            appendText(match[0]);
+            continue;
+        }
+
+        if (!isClosing) {
+            const element = document.createElement(meta.tag);
+            for (const [attr, value] of meta.attrs) {
+                try {
+                    element.setAttribute(attr, value);
+                } catch (error) {
+                    console.warn('[LingoTrans] Failed to restore attribute', attr, error);
+                }
+            }
+            (cursor as Element | DocumentFragment).appendChild(element);
+            stack.push(element);
+            cursor = element;
+        } else {
+            stack.pop();
+            cursor = stack[stack.length - 1] ?? fragment;
+        }
+    }
+
+    appendText(translated.slice(lastIndex));
+    (target as HTMLElement).replaceChildren(fragment);
+}
+
+export function restoreOriginalBlocks(blocks: Iterable<TranslatableBlock>) {
+    for (const block of blocks) {
+        try {
+            (block.element as HTMLElement).innerHTML = block.originalHTML;
+        } catch (error) {
+            console.debug('[LingoTrans] Failed to restore original HTML for block', error);
+        }
+    }
+}

@@ -14,9 +14,11 @@ import {
     START_SELECTION_TRANSLATION,
     isContextTranslateSelectionMessage,
     isContextTranslatePageMessage,
+    type SelectionTranslationPortRequest,
     type SelectionTranslationPortResponse
 } from '@src/lib/extension-messages';
 import { resolveLanguageLabel } from '@src/lib/languages';
+import { collectTranslatableBlocks, reconstructHTMLFromTranslation, restoreOriginalBlocks, type TranslatableBlock } from '@src/lib/translation/dom-translator';
 import type { Settings } from '@src/types/settings';
 
 type SelectionBehavior = Settings['selectionBehavior'];
@@ -535,14 +537,17 @@ export default defineContentScript({
             startTranslation(candidate, 'manual');
         };
 
-        const translatePageInline = (targetLanguageOverride?: string) => {
+        const translatePageInline = async (targetLanguageOverride?: string) => {
             const body = document.body;
             if (!body) {
                 return;
             }
 
-            const sourceText = body.innerText ?? '';
-            if (!sourceText.trim()) {
+            const blocks = collectTranslatableBlocks(body);
+            const fallbackText = body.innerText ?? '';
+            const hasReadableText = fallbackText.trim().length > 0;
+
+            if (blocks.length === 0 && !hasReadableText) {
                 console.debug('[LingoTrans] Page translation skipped: no readable text content.');
                 return;
             }
@@ -588,118 +593,160 @@ export default defineContentScript({
                 }, delayMs);
             };
 
-            applyOverlayStyle('loading', `Translating page to ${targetLabel}…`);
             body.appendChild(overlay);
+            applyOverlayStyle('loading', `Translating page to ${targetLabel}…`);
 
-            let port: RuntimePort | null = null;
-            try {
-                port = browser.runtime.connect({ name: SELECTION_TRANSLATION_PORT });
-            } catch (error) {
-                console.debug('[LingoTrans] Failed to open translation port for full-page translation', error);
-                applyOverlayStyle('error', 'Unable to start page translation. Check your connection.');
-                teardownOverlay(3600);
+            const translateSegmentViaPort = (segment: string, options?: { preservePlaceholders?: boolean }) =>
+                new Promise<string>((resolve, reject) => {
+                    let port: RuntimePort | null = null;
+                    try {
+                        port = browser.runtime.connect({ name: SELECTION_TRANSLATION_PORT });
+                    } catch {
+                        reject(new Error('Unable to start page translation. Check your connection.'));
+                        return;
+                    }
+
+                    const requestId = `page-${Date.now()}-${translationSequence++}`;
+                    let aggregated = '';
+                    let settled = false;
+
+                    const cleanupPort = () => {
+                        if (!port) {
+                            return;
+                        }
+
+                        try {
+                            port.onMessage?.removeListener?.(handlePortMessage as (message: unknown) => void);
+                        } catch (error) {
+                            console.debug('[LingoTrans] Failed to remove page translation port message listener', error);
+                        }
+
+                        try {
+                            port.onDisconnect?.removeListener?.(handlePortDisconnect);
+                        } catch (error) {
+                            console.debug('[LingoTrans] Failed to remove page translation port disconnect listener', error);
+                        }
+
+                        try {
+                            port.disconnect?.();
+                        } catch (error) {
+                            console.debug('[LingoTrans] Failed to disconnect page translation port', error);
+                        }
+
+                        port = null;
+                    };
+
+                    const finalizeSuccess = (value?: string) => {
+                        if (settled) {
+                            return;
+                        }
+                        settled = true;
+                        cleanupPort();
+                        resolve((value ?? '').length > 0 ? (value ?? '') : aggregated);
+                    };
+
+                    const finalizeError = (message: string) => {
+                        if (settled) {
+                            return;
+                        }
+                        settled = true;
+                        cleanupPort();
+                        reject(new Error(message || 'Page translation failed.'));
+                    };
+
+                    const handlePortMessage = (message: SelectionTranslationPortResponse) => {
+                        if (settled || message.requestId !== requestId) {
+                            return;
+                        }
+
+                        switch (message.type) {
+                            case SELECTION_TRANSLATION_CHUNK:
+                                if (message.error) {
+                                    finalizeError(message.error);
+                                    return;
+                                }
+                                if (message.content) {
+                                    aggregated += message.content;
+                                }
+                                if (message.done) {
+                                    finalizeSuccess();
+                                }
+                                break;
+                            case SELECTION_TRANSLATION_COMPLETE:
+                                finalizeSuccess(message.content ?? aggregated);
+                                break;
+                            case SELECTION_TRANSLATION_ERROR:
+                                finalizeError(message.message);
+                                break;
+                            default:
+                                break;
+                        }
+                    };
+
+                    const handlePortDisconnect = () => {
+                        if (settled) {
+                            return;
+                        }
+                        finalizeError('Translation interrupted. Try again.');
+                    };
+
+                    port.onMessage?.addListener?.(handlePortMessage as (message: unknown) => void);
+                    port.onDisconnect?.addListener?.(handlePortDisconnect);
+
+                    const payload = {
+                        type: START_SELECTION_TRANSLATION,
+                        requestId,
+                        text: segment,
+                        targetLanguage,
+                        sourceLanguage: 'auto',
+                        preservePlaceholders: options?.preservePlaceholders
+                    } satisfies SelectionTranslationPortRequest;
+
+                    try {
+                        port.postMessage(payload);
+                    } catch (error) {
+                        console.debug('[LingoTrans] Failed to dispatch page translation request', error);
+                        finalizeError('Unable to start page translation.');
+                    }
+                });
+
+            if (blocks.length === 0) {
+                try {
+                    const translation = await translateSegmentViaPort(fallbackText);
+                    if (translation.trim()) {
+                        body.innerText = translation;
+                    }
+                    applyOverlayStyle('success', `Page translated to ${targetLabel}.`);
+                    teardownOverlay(2400);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : 'Page translation failed.';
+                    applyOverlayStyle('error', message);
+                    teardownOverlay(3600);
+                }
                 return;
             }
 
-            const requestId = `page-${Date.now()}-${translationSequence++}`;
-            let translated = '';
-            let settled = false;
-
-            const cleanupPort = () => {
-                if (!port) {
-                    return;
-                }
-
-                try {
-                    port.onMessage?.removeListener?.(handlePortMessage as (message: unknown) => void);
-                } catch (error) {
-                    console.debug('[LingoTrans] Failed to remove page translation port message listener', error);
-                }
-
-                try {
-                    port.onDisconnect?.removeListener?.(handlePortDisconnect);
-                } catch (error) {
-                    console.debug('[LingoTrans] Failed to remove page translation port disconnect listener', error);
-                }
-
-                try {
-                    port.disconnect?.();
-                } catch (error) {
-                    console.debug('[LingoTrans] Failed to disconnect page translation port', error);
-                }
-
-                port = null;
-            };
-
-            const finalizeSuccess = () => {
-                if (settled) return;
-                settled = true;
-                cleanupPort();
-                body.innerText = translated || sourceText;
-                applyOverlayStyle('success', `Page translated to ${targetLabel}.`);
-                teardownOverlay(2400);
-            };
-
-            const finalizeError = (message: string) => {
-                if (settled) return;
-                settled = true;
-                cleanupPort();
-                applyOverlayStyle('error', message || 'Page translation failed.');
-                teardownOverlay(3600);
-            };
-
-            const handlePortMessage = (message: SelectionTranslationPortResponse) => {
-                if (message.requestId !== requestId || settled) {
-                    return;
-                }
-
-                switch (message.type) {
-                    case SELECTION_TRANSLATION_CHUNK:
-                        if (message.error) {
-                            finalizeError(message.error);
-                            return;
-                        }
-                        if (message.content) {
-                            translated += message.content;
-                        }
-                        if (message.done) {
-                            finalizeSuccess();
-                        }
-                        break;
-                    case SELECTION_TRANSLATION_COMPLETE:
-                        if (message.content) {
-                            translated = message.content;
-                        }
-                        finalizeSuccess();
-                        break;
-                    case SELECTION_TRANSLATION_ERROR:
-                        finalizeError(message.message);
-                        break;
-                    default:
-                        break;
-                }
-            };
-
-            const handlePortDisconnect = () => {
-                if (settled) {
-                    return;
-                }
-                finalizeError('Translation interrupted. Try again.');
-            };
-
-            port.onMessage?.addListener?.(handlePortMessage as (message: unknown) => void);
-            port.onDisconnect?.addListener?.(handlePortDisconnect);
+            const processedBlocks: TranslatableBlock[] = [];
 
             try {
-                port.postMessage({
-                    type: START_SELECTION_TRANSLATION,
-                    requestId,
-                    text: sourceText,
-                    targetLanguage
-                });
+                for (let index = 0; index < blocks.length; index++) {
+                    const block = blocks[index];
+                    applyOverlayStyle('loading', `Translating section ${index + 1} of ${blocks.length}…`);
+                    const translation = await translateSegmentViaPort(block.segment, { preservePlaceholders: true });
+                    if (!translation.trim()) {
+                        continue;
+                    }
+                    reconstructHTMLFromTranslation(block.element, translation, block.tokenMap);
+                    processedBlocks.push(block);
+                }
+
+                applyOverlayStyle('success', `Page translated to ${targetLabel}.`);
+                teardownOverlay(2400);
             } catch (error) {
-                console.debug('[LingoTrans] Failed to dispatch page translation request', error);
-                finalizeError('Unable to start page translation.');
+                restoreOriginalBlocks(processedBlocks);
+                const message = error instanceof Error ? error.message : 'Page translation failed.';
+                applyOverlayStyle('error', message);
+                teardownOverlay(3600);
             }
         };
 
@@ -769,7 +816,7 @@ export default defineContentScript({
 
             if (isContextTranslatePageMessage(message)) {
                 if (message.mode === 'inline') {
-                    translatePageInline(message.targetLanguage);
+                    void translatePageInline(message.targetLanguage);
                 } else if (message.mode === 'sidepanel') {
                     void openSidePanel();
                 }
